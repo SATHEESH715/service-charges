@@ -197,3 +197,26 @@ jobs:
             git pull --rebase
           done
           exit 1
+
+  # Runs at the same time as the two publish jobs above. It skips itself until the secret exists.
+  publish-to-app-insights:
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    env:
+      APPINSIGHTS_CONNECTION_STRING: ${{ secrets.APPINSIGHTS_CONNECTION_STRING }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: summary
+          path: summary
+
+      - name: Send the result to Application Insights
+        if: ${{ env.APPINSIGHTS_CONNECTION_STRING != '' }}
+        run: node scripts/send-to-app-insights.mjs
