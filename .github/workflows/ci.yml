@@ -1,0 +1,199 @@
+name: Test and publish results
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+env:
+  PROJECT_NAME: ServiceCharges          # shown in the Teams report
+  RESULT_FOLDER: servicecharges        # folder name in result-repo and in the blob container
+  STORAGE_ACCOUNT: testreportsatheesh01
+  CONTAINER: test-results
+
+permissions:
+  id-token: write   # needed for the Azure sign-in without a stored password
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: .NET unit tests
+        id: dotnet
+        continue-on-error: true
+        working-directory: api
+        run: dotnet test --logger "trx;LogFileName=results.trx"
+
+      - name: Angular unit tests
+        id: angular
+        continue-on-error: true
+        working-directory: web
+        run: |
+          npm ci
+          npx ng test --watch=false --reporters=junit --output-file=test-results/junit.xml
+
+      - name: Build the app (Angular inside the API)
+        run: |
+          (cd web && npx ng build)
+          mkdir -p api/SampleApi/wwwroot
+          cp -r web/dist/web/browser/. api/SampleApi/wwwroot/
+          dotnet publish api/SampleApi -c Release -o publish
+
+      # Optional deploy. It only runs when the repository variable APP_SERVICE_NAME is set.
+      # Also set the variables APP_URL and RESOURCE_GROUP, and the three Azure secrets.
+      - name: Sign in to Azure (deploy only)
+        if: ${{ vars.APP_SERVICE_NAME != '' }}
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy to the App Service
+        if: ${{ vars.APP_SERVICE_NAME != '' }}
+        env:
+          WEBAPP_NAME: ${{ vars.APP_SERVICE_NAME }}
+          RESOURCE_GROUP: ${{ vars.RESOURCE_GROUP }}
+        run: |
+          (cd publish && zip -qr ../app.zip .)
+          az webapp deploy --resource-group "$RESOURCE_GROUP" --name "$WEBAPP_NAME" --src-path app.zip --type zip
+
+      - name: Choose the address to test
+        env:
+          APP_SERVICE_NAME: ${{ vars.APP_SERVICE_NAME }}
+          APP_URL: ${{ vars.APP_URL }}
+        run: |
+          if [ -n "$APP_SERVICE_NAME" ]; then
+            echo "TEST_URL=$APP_URL" >> "$GITHUB_ENV"
+          else
+            # No App Service: start the published app here and test that.
+            echo "TEST_URL=http://127.0.0.1:5003" >> "$GITHUB_ENV"
+            (cd publish && ASPNETCORE_URLS=http://127.0.0.1:5003 nohup dotnet SampleApi.dll > ../app.log 2>&1 &)
+          fi
+
+      - name: Wait for the app to answer
+        timeout-minutes: 8
+        run: |
+          # A deployed free-plan app sleeps when idle, so the first request can take a while.
+          for i in $(seq 1 40); do
+            if curl -sf "$TEST_URL/api/health" > /dev/null; then echo "app is up"; exit 0; fi
+            echo "waiting ($i)"; sleep 5
+          done
+          echo "app did not answer in time"; cat app.log 2>/dev/null || true; exit 1
+
+      - name: Bruno API tests
+        id: bruno
+        continue-on-error: true
+        working-directory: bruno
+        run: |
+          npm install
+          npm test -- --env-var baseUrl="$TEST_URL"
+
+      - name: Playwright UI tests
+        id: playwright
+        continue-on-error: true
+        working-directory: playwright
+        env:
+          BASE_URL: ${{ env.TEST_URL }}
+        run: |
+          npm install
+          npx playwright install --with-deps chromium
+          npm test
+
+      - name: Summarise results
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash scripts/write-summary.sh
+
+      - name: Save the result file for the publish jobs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: summary
+          path: summary/summary.json
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright/playwright-report
+
+      - name: Fail the job if any tests failed
+        if: steps.dotnet.outcome == 'failure' || steps.angular.outcome == 'failure' || steps.bruno.outcome == 'failure' || steps.playwright.outcome == 'failure'
+        run: exit 1
+
+  # The two publish jobs below run at the same time, once the tests have finished.
+  publish-to-blob:
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: summary
+          path: summary
+
+      - name: Sign in to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Upload the result to blob storage
+        run: |
+          # summary.json is what the report reads. The dated copy keeps history.
+          az storage blob upload --account-name "$STORAGE_ACCOUNT" --container-name "$CONTAINER" \
+            --name "$RESULT_FOLDER/summary.json" --file summary/summary.json --overwrite --auth-mode login
+          az storage blob upload --account-name "$STORAGE_ACCOUNT" --container-name "$CONTAINER" \
+            --name "$RESULT_FOLDER/history/$(date -u +%Y%m%d-%H%M%S)-${{ github.run_id }}.json" \
+            --file summary/summary.json --auth-mode login
+
+  publish-to-result-repo:
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: summary
+          path: summary
+
+      - name: Check out result-repo
+        uses: actions/checkout@v4
+        with:
+          repository: SATHEESH715/result-repo
+          token: ${{ secrets.RESULTS_REPO_TOKEN }}
+          path: result-repo
+
+      - name: Push the result file
+        run: |
+          mkdir -p "result-repo/$RESULT_FOLDER"
+          cp summary/summary.json "result-repo/$RESULT_FOLDER/summary.json"
+          cd result-repo
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then echo "nothing changed"; exit 0; fi
+          git commit -m "chore: $PROJECT_NAME results for ${GITHUB_SHA::7}"
+          # Other stripes may push at the same moment, so pull and retry.
+          for i in 1 2 3 4 5 6 7 8; do
+            if git push; then exit 0; fi
+            git pull --rebase
+          done
+          exit 1

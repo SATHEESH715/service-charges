@@ -1,0 +1,18 @@
+<main>
+  <h1 data-testid="page-title">Service charges</h1>
+  <table data-testid="item-table">
+    <thead>
+      <tr><th>Number</th><th>Charge</th><th>Block</th><th>Status</th></tr>
+    </thead>
+    <tbody>
+      @for (i of items(); track i.id) {
+        <tr [attr.data-testid]="'item-row-' + i.id">
+          <td>{{ i.number }}</td>
+          <td>{{ i.name }}</td>
+          <td>{{ i.detail }}</td>
+          <td>{{ i.status }}</td>
+        </tr>
+      }
+    </tbody>
+  </table>
+</main>

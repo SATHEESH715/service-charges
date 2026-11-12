@@ -1,0 +1,12 @@
+bin/
+obj/
+TestResults/
+node_modules/
+dist/
+.angular/
+results/
+test-results/
+playwright-report/
+publish/
+summary/
+api/SampleApi/wwwroot/
