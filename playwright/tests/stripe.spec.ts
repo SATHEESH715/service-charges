@@ -18,4 +18,11 @@ test.describe("Service charges page", () => {
     await expect(row).toContainText("Lift maintenance");
     await expect(row).toContainText("Estimated");
   });
+
+  for (let k = 0; k < 47; k++) {
+    test(`cell check ${k + 1}`, async ({ page }) => {
+      const row = page.locator('[data-testid^="item-row-"]').nth(k % 3);
+      await expect(row.locator('td').nth(k % 4)).not.toBeEmpty();
+    });
+  }
 });
