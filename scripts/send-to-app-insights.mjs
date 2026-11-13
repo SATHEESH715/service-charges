@@ -49,6 +49,8 @@ const response = await fetch(`${endpoint}/v2/track`, {
 const body = await response.json().catch(() => ({}));
 if (!response.ok || body.itemsAccepted !== 1) {
   console.error(`Application Insights rejected the event: ${response.status} ${JSON.stringify(body)}`);
+  // The workflow marks this step as allowed to fail, so show a warning on the run instead of a red stripe.
+  console.log(`::warning title=Application Insights::The result was not sent (status ${response.status}). Check the resource and its workspace.`);
   process.exit(1);
 }
 console.log(`Sent the TestRun event for ${summary.folder}`);

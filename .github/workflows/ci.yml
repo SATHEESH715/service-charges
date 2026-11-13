@@ -219,4 +219,5 @@ jobs:
 
       - name: Send the result to Application Insights
         if: ${{ env.APPINSIGHTS_CONNECTION_STRING != '' }}
+        continue-on-error: true   # a monitoring problem must not turn a passing stripe red
         run: node scripts/send-to-app-insights.mjs
